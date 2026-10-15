@@ -1247,6 +1247,7 @@ document.querySelectorAll('nav.tabs button').forEach(btn=>{
     if (btn.dataset.tab === 'beranda') { muatBeranda(); muatRekap(); }
     if (btn.dataset.tab === 'kalender') muatHariLibur();
     if (btn.dataset.tab === 'scan' && !html5QrCode) mulaiScanner();
+    if (btn.dataset.tab === 'scan' && 'NDEFReader' in window && !RFID.nfc && !RFID.nfcDimatikanManual) toggleNfcHp();
   });
 });
 
@@ -1630,6 +1631,7 @@ async function toggleNfcHp(){
   if (RFID.nfc) {
     try{ RFID.nfc.abort.abort(); }catch(e){}
     RFID.nfc = null;
+    RFID.nfcDimatikanManual = true;
     labelNfc();
     tampilkanToast('NFC HP dimatikan.');
     return;
@@ -1641,6 +1643,7 @@ async function toggleNfcHp(){
     reader.onreading = (ev)=>{ if (ev.serialNumber) terimaUid(ev.serialNumber, 'nfc'); };
     reader.onreadingerror = ()=> tampilkanToast('Kartu terdeteksi tetapi tidak bisa dibaca lewat NFC HP. Coba reader USB.');
     RFID.nfc = { reader: reader, abort: abort };
+    RFID.nfcDimatikanManual = false;
     labelNfc();
     tampilkanToast('NFC HP aktif. Tempelkan kartu di bagian belakang HP.');
   } catch(err){
