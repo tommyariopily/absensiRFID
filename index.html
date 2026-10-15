@@ -444,6 +444,9 @@
   .rfid-titik{width:9px;height:9px;border-radius:50%;background:var(--hijau);flex-shrink:0;animation:rfidDenyut 1.6s ease-in-out infinite;}
   @keyframes rfidDenyut{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.35;transform:scale(.8);}}
   .rfid-panel .btn-kecil{padding:7px 10px;font-size:11.5px;}
+  .mode-scan{display:flex;gap:6px;margin:12px 0;padding:4px;background:var(--krem);border:1.5px solid var(--garis);border-radius:12px;}
+  .mode-scan button{flex:1;padding:10px 6px;border:none;border-radius:9px;background:transparent;font-size:12.5px;font-weight:600;color:var(--teks-muda);}
+  .mode-scan button.aktif{background:var(--hijau-tua);color:#fff;}
   .rfid-log{flex-basis:100%;font-family:var(--font-data);font-size:11px;color:var(--teks-muda);line-height:1.5;word-break:break-all;}
   .daftar-siswa .btn-rfid{
     background:var(--krem);border:1.5px solid var(--garis);color:var(--teks-muda);
@@ -835,6 +838,10 @@
       <div class="kartu">
         <span class="eyebrow">Absensi Masuk / Pulang</span>
         <h2>Pindai QR atau Tempel Kartu</h2>
+        <div class="mode-scan" id="mode-scan">
+          <button type="button" class="aktif" data-mode="kamera">📷 Kamera QR</button>
+          <button type="button" data-mode="kartu">💳 Kartu RFID / NFC</button>
+        </div>
         <div class="scan-frame" id="scan-frame">
           <div id="qr-reader"></div>
         </div>
@@ -1052,7 +1059,7 @@ let daftarSiswaCache = [];
 let html5QrCode = null;
 let sedangMemproses = false;
 // Kartu RFID / e-money: buffer reader USB, status pendaftaran kartu, dan sesi NFC HP.
-const RFID = { buffer:'', terakhirKey:0, uidTerakhir:'', waktuUid:0, pairing:null, nfc:null, audio:null };
+const RFID = { buffer:'', terakhirKey:0, uidTerakhir:'', waktuUid:0, pairing:null, nfc:null, audio:null, nBaca:0, nGalat:0, sibuk:0 };
 let rekapCache = [];
 let periodeCache = [];
 let periodeKolomTanggal = [];
@@ -1248,8 +1255,7 @@ document.querySelectorAll('nav.tabs button').forEach(btn=>{
     el('tab-' + btn.dataset.tab).classList.remove('hidden');
     if (btn.dataset.tab === 'beranda') { muatBeranda(); muatRekap(); }
     if (btn.dataset.tab === 'kalender') muatHariLibur();
-    if (btn.dataset.tab === 'scan' && !html5QrCode) mulaiScanner();
-    if (btn.dataset.tab === 'scan' && 'NDEFReader' in window && !RFID.nfc && !RFID.nfcDimatikanManual) toggleNfcHp();
+    if (btn.dataset.tab === 'scan') setModeScan(modeScanTersimpan());
   });
 });
 
@@ -1577,7 +1583,8 @@ function catatRfid(teks){
   const w = new Date();
   const jam = [w.getHours(), w.getMinutes(), w.getSeconds()].map(n=>String(n).padStart(2,'0')).join(':');
   const k = el('rfid-log');
-  if (k) k.textContent = 'Log kartu · ' + jam + ' · ' + teks;
+  const hitung = ('NDEFReader' in window) ? (' · NFC: ' + RFID.nBaca + ' baca / ' + RFID.nGalat + ' galat') : '';
+  if (k) k.textContent = 'Log kartu · ' + jam + ' · ' + teks + hitung;
 }
 
 function terimaUid(uid, sumber){
@@ -1585,26 +1592,31 @@ function terimaUid(uid, sumber){
   if (!uid) { catatRfid('pembacaan ' + sumber + ' tanpa UID'); return; }
   const sekarang = Date.now();
   // Reader kadang mengirim UID yang sama berulang selama kartu menempel: abaikan selama 4 detik.
-  if (uid === RFID.uidTerakhir && sekarang - RFID.waktuUid < 4000) { catatRfid('UID ' + uid + ' diabaikan (sama dengan pembacaan <4 detik lalu)'); return; }
+  const menungguKonfirmasi = !!(RFID.pairing && RFID.pairing.kandidat);
+  if (!menungguKonfirmasi && uid === RFID.uidTerakhir && sekarang - RFID.waktuUid < 4000) { catatRfid('UID ' + uid + ' diabaikan (sama dengan pembacaan <4 detik lalu)'); return; }
   catatRfid('terbaca via ' + sumber + ': ' + uid);
   RFID.uidTerakhir = uid; RFID.waktuUid = sekarang;
 
-  if (RFID.pairing) { RFID.pairing.onUid(uid); return; }
+  if (RFID.pairing) { RFID.pairing.onUid(uid, sumber); return; }
   if (el('tab-scan').classList.contains('hidden')) { tampilkanToast('Buka tab Scan untuk absen dengan kartu.'); return; }
   absenDenganKartu(uid);
 }
 
 async function absenDenganKartu(uid){
-  if (sedangMemproses) return;
-  sedangMemproses = true;
+  // Penanda sibuk khusus kartu, dengan batas 8 detik supaya tidak pernah macet selamanya.
+  if (RFID.sibuk && Date.now() - RFID.sibuk < 8000) { catatRfid('masih memproses kartu sebelumnya, tempel lagi sebentar'); return; }
+  RFID.sibuk = Date.now();
   const waktuClient = waktuAkuratIso(); // waktu TEPAT saat kartu ditempel
-  tampilkanKotakMemuat('Membaca kartu');
   try {
+    tampilkanKotakMemuat('Membaca kartu');
     const res = await prosesAbsen(null, waktuClient, { uid: uid, metode: 'RFID' });
     catatRfid((res && res.success ? 'berhasil: ' : 'ditolak server: ') + (res && res.message ? res.message : ''));
     bunyiKartu(!!(res && res.success));
+  } catch(err){
+    catatRfid('galat: ' + (err && err.message ? err.message : err));
+    tampilkanToast('Gagal memproses kartu. Periksa koneksi internet.');
   } finally {
-    setTimeout(()=>{ sedangMemproses = false; }, 1200);
+    setTimeout(()=>{ RFID.sibuk = 0; }, 1200);
   }
 }
 
@@ -1637,8 +1649,38 @@ function labelNfc(){
   const teks = RFID.nfc ? '📲 NFC HP aktif (ketuk untuk matikan)' : '📲 Pakai NFC HP';
   document.querySelectorAll('.tombol-nfc').forEach(b=>{ b.textContent = teks; });
 }
+
+// Selalu membuat sesi NFC BARU (sesi lama dibuang). Panggil dari ketukan pengguna, persis seperti
+// pada pendaftaran kartu yang terbukti berhasil. Penangan dipasang SEBELUM scan() agar tidak ada
+// pembacaan yang terlewat.
+async function mulaiSesiNfc(){
+  if (!('NDEFReader' in window)) { tampilkanToast('Browser ini tidak mendukung NFC HP. Gunakan Chrome di Android.'); return false; }
+  if (RFID.nfc) { try{ RFID.nfc.abort.abort(); }catch(e){} RFID.nfc = null; }
+  try {
+    const reader = new NDEFReader();
+    const abort = new AbortController();
+    reader.onreading = (ev)=>{ RFID.nBaca++; terimaUid(ev.serialNumber, 'nfc'); };
+    reader.onreadingerror = ()=>{
+      RFID.nGalat++;
+      catatRfid('kartu terdeteksi tetapi GAGAL dibaca oleh Chrome');
+      tampilkanToast('Kartu terdeteksi tetapi tidak bisa dibaca lewat NFC HP. Coba reader USB.');
+    };
+    await reader.scan({ signal: abort.signal });
+    RFID.nfc = { reader: reader, abort: abort };
+    RFID.nfcDimatikanManual = false;
+    labelNfc();
+    catatRfid('sesi NFC dimulai, tempelkan kartu di punggung HP');
+    return true;
+  } catch(err){
+    labelNfc();
+    const pesan = (err && err.message) ? err.message : String(err);
+    catatRfid('NFC gagal diaktifkan: ' + pesan);
+    tampilkanToast('NFC tidak bisa diaktifkan: ' + pesan + '. Pastikan NFC di pengaturan HP menyala.');
+    return false;
+  }
+}
+
 async function toggleNfcHp(){
-  if (!('NDEFReader' in window)) { tampilkanToast('Browser ini tidak mendukung NFC HP. Gunakan Chrome di Android.'); return; }
   if (RFID.nfc) {
     try{ RFID.nfc.abort.abort(); }catch(e){}
     RFID.nfc = null;
@@ -1647,35 +1689,44 @@ async function toggleNfcHp(){
     tampilkanToast('NFC HP dimatikan.');
     return;
   }
-  try {
-    const reader = new NDEFReader();
-    const abort = new AbortController();
-    await reader.scan({ signal: abort.signal });
-    reader.onreading = (ev)=>{ terimaUid(ev.serialNumber, 'nfc'); };
-    reader.onreadingerror = ()=>{ catatRfid('kartu terdeteksi tetapi GAGAL dibaca oleh Chrome'); tampilkanToast('Kartu terdeteksi tetapi tidak bisa dibaca lewat NFC HP. Coba reader USB.'); };
-    RFID.nfc = { reader: reader, abort: abort };
-    RFID.nfcDimatikanManual = false;
-    labelNfc();
-    tampilkanToast('NFC HP aktif. Tempelkan kartu di bagian belakang HP.');
-  } catch(err){
-    tampilkanToast('NFC tidak bisa diaktifkan: ' + (err && err.message ? err.message : err) + '. Pastikan NFC di pengaturan HP menyala.');
-  }
+  await mulaiSesiNfc();
 }
+
+// Sesi NFC bisa mati diam-diam saat layar terkunci / pindah aplikasi: pasang ulang saat halaman kembali terlihat.
 document.addEventListener('visibilitychange', async ()=>{
   if (document.visibilityState !== 'visible' || !RFID.nfc) return;
-  try { RFID.nfc.abort.abort(); } catch(e){}
-  RFID.nfc = null;
-  try {
-    const reader = new NDEFReader();
-    const abort = new AbortController();
-    await reader.scan({ signal: abort.signal });
-    reader.onreading = (ev)=>{ terimaUid(ev.serialNumber, 'nfc'); };
-    reader.onreadingerror = ()=>{ catatRfid('kartu terdeteksi tetapi GAGAL dibaca oleh Chrome'); };
-    RFID.nfc = { reader: reader, abort: abort };
-    catatRfid('sesi NFC dipasang ulang');
-  } catch(err){ catatRfid('NFC perlu diaktifkan ulang: ' + (err && err.message ? err.message : err)); }
-  labelNfc();
+  const ok = await mulaiSesiNfc();
+  if (!ok) catatRfid('sesi NFC perlu diaktifkan ulang: ketuk tombol NFC HP');
 });
+
+/* ----- Mode Scan: Kamera QR atau Kartu RFID/NFC ----- */
+let sedangGantiMode = false;
+function modeScanTersimpan(){ try{ return localStorage.getItem('absensi_mode_scan') || 'kamera'; }catch(e){ return 'kamera'; } }
+async function setModeScan(mode){
+  if (sedangGantiMode) return;
+  sedangGantiMode = true;
+  try {
+    try{ localStorage.setItem('absensi_mode_scan', mode); }catch(e){}
+    document.querySelectorAll('#mode-scan button').forEach(b=>b.classList.toggle('aktif', b.dataset.mode === mode));
+    if (mode === 'kartu') {
+      // NFC dimulai LEBIH DULU (masih dalam ketukan pengguna), baru kamera dimatikan.
+      if ('NDEFReader' in window) await mulaiSesiNfc();
+      else catatRfid('NFC HP tidak didukung browser ini; pakai reader USB');
+      el('scan-frame').classList.add('hidden');
+      if (html5QrCode) {
+        const k = html5QrCode;
+        try { await k.stop(); } catch(e){}
+        try { k.clear(); } catch(e){}
+        html5QrCode = null;
+        el('scan-frame').classList.remove('aktif');
+      }
+    } else {
+      el('scan-frame').classList.remove('hidden');
+      if (!html5QrCode) mulaiScanner();
+    }
+  } finally { sedangGantiMode = false; }
+}
+document.querySelectorAll('#mode-scan button').forEach(b=>b.addEventListener('click', ()=> setModeScan(b.dataset.mode)));
 if ('NDEFReader' in window) document.querySelectorAll('.tombol-nfc').forEach(b=>b.classList.remove('hidden'));
 document.querySelectorAll('.tombol-nfc').forEach(b=>b.addEventListener('click', toggleNfcHp));
 
@@ -1687,14 +1738,15 @@ function mulaiPendaftaranKartu(antrian){
   if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   el('modal-daftar-kartu').classList.remove('hidden');
   tampilkanSiswaPendaftaran();
-  RFID.nfcDariPendaftaran = false;
-  if ('NDEFReader' in window && !RFID.nfc) { RFID.nfcDariPendaftaran = true; toggleNfcHp(); }
+  RFID.nfcSebelumnya = !!RFID.nfc;
+  if ('NDEFReader' in window) mulaiSesiNfc(); // selalu sesi baru dari ketukan 💳
 }
 
 function tampilkanSiswaPendaftaran(){
   const p = RFID.pairing;
   if (!p) return;
   if (p.idx >= p.antrian.length) { akhiriPendaftaranKartu(); return; }
+  p.kandidat = null;
   const s = p.antrian[p.idx];
   const banyak = p.antrian.length > 1;
   el('dk-progres').textContent = banyak ? ('Siswa ' + (p.idx + 1) + ' dari ' + p.antrian.length + ' · ' + p.berhasil + ' tersimpan') : '';
@@ -1706,10 +1758,38 @@ function tampilkanSiswaPendaftaran(){
   el('input-uid-manual').value = '';
 }
 
-async function simpanKartuSiswa(uid){
+async function simpanKartuSiswa(uid, sumber){
   const p = RFID.pairing;
   if (!p || p.menyimpan) return;
   const s = p.antrian[p.idx];
+  const u = String(uid).replace(/[\s:\-]/g, '').toUpperCase();
+
+  // UID berawalan 08 (4 byte) = "random ID" menurut standar ISO 14443: berubah setiap ditempel,
+  // jadi tidak mungkin dikenali lagi saat absen. Hanya diperiksa untuk NFC HP, yang mengirim
+  // byte dalam urutan asli (reader USB sering mengirim desimal/urutan terbalik).
+  if (sumber === 'nfc' && /^08[0-9A-F]{6}$/.test(u)) {
+    p.kandidat = null;
+    bunyiKartu(false);
+    catatRfid('UID ' + u + ' berawalan 08 (UID acak)');
+    tampilkanToast('Kartu ini memakai UID ACAK (berubah tiap ditempel), tidak cocok untuk absensi. Pakai kartu lain.');
+    return;
+  }
+  // Wajib dua kali tempel dengan hasil sama, supaya kartu yang UID-nya tidak stabil ketahuan sekarang,
+  // bukan setelah semua siswa terdaftar.
+  if (!p.kandidat) {
+    p.kandidat = u;
+    bunyiKartu(true);
+    el('dk-tunggu-teks').textContent = 'Terbaca ✓ Tempelkan kartu yang SAMA sekali lagi untuk konfirmasi.';
+    return;
+  }
+  if (p.kandidat !== u) {
+    p.kandidat = null;
+    bunyiKartu(false);
+    tampilkanToast('UID berbeda setiap ditempel. Kartu ini tidak stabil dan tidak cocok untuk absensi.');
+    tampilkanSiswaPendaftaran();
+    return;
+  }
+  p.kandidat = null;
   p.menyimpan = true;
   el('dk-tunggu-teks').textContent = 'Menyimpan kartu ' + s.nama + '…';
   let res;
@@ -1735,8 +1815,10 @@ function akhiriPendaftaranKartu(){
   const p = RFID.pairing;
   RFID.pairing = null;
   el('modal-daftar-kartu').classList.add('hidden');
-  if (RFID.nfcDariPendaftaran && RFID.nfc) { try{ RFID.nfc.abort.abort(); }catch(e){} RFID.nfc = null; labelNfc(); }
-  RFID.nfcDariPendaftaran = false;
+  if ('NDEFReader' in window) {
+    if (RFID.nfcSebelumnya) mulaiSesiNfc();                 // kembalikan sesi NFC yang tadinya aktif
+    else if (RFID.nfc) { try{ RFID.nfc.abort.abort(); }catch(e){} RFID.nfc = null; labelNfc(); }
+  }
   if (p && p.berhasil) tampilkanToast(p.berhasil + ' kartu berhasil didaftarkan.');
   muatSiswa();
 }
