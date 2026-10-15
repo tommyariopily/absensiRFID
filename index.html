@@ -455,8 +455,10 @@
   .dk-info{font-size:12px;color:var(--teks-muda);font-family:var(--font-data);margin-top:3px;}
   .dk-tunggu{display:flex;align-items:center;justify-content:center;gap:8px;margin:18px 0 12px;padding:14px 10px;background:var(--hijau-muda);border-radius:12px;font-size:12.5px;font-weight:600;color:var(--hijau-tua);line-height:1.4;}
   .dk-manual{display:flex;gap:8px;}
-  .dk-manual input{flex:1;min-width:0;padding:10px 12px;border:1.5px solid var(--garis);border-radius:9px;font-family:var(--font-data);font-size:13px;}
-  .dk-manual .btn{flex:0 0 auto;padding:10px 14px;font-size:12.5px;}
+  .dk-manual input{flex:1 1 0;width:auto;min-width:0;padding:10px 12px;border:1.5px solid var(--garis);border-radius:9px;font-family:var(--font-data);font-size:13px;}
+  .dk-manual .btn{flex:0 0 auto;width:auto;min-width:64px;padding:10px 14px;font-size:12.5px;}
+  .dk-nfc{margin-top:10px;}
+  .dk-nfc .btn{width:100%;padding:10px;font-size:12.5px;}
 
   /* ===== REKAP ===== */
   .filter-row{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;}
@@ -845,7 +847,7 @@
         </div>
         <div class="rfid-panel" id="rfid-panel">
           <div class="rfid-status"><span class="rfid-titik"></span><span>Reader kartu siap. Tempelkan kartu RFID / e-money.</span></div>
-          <button type="button" class="btn btn-ghost btn-kecil hidden" id="btn-nfc-hp">📲 Pakai NFC HP</button>
+          <button type="button" class="btn btn-ghost btn-kecil tombol-nfc hidden" id="btn-nfc-hp">📲 Pakai NFC HP</button>
         </div>
         <div class="manual-toggle">
           <a id="toggle-manual">Kamera bermasalah? Input NIS manual</a>
@@ -1014,6 +1016,7 @@
       <input type="text" id="input-uid-manual" placeholder="atau ketik / tempel UID kartu" autocomplete="off" autocapitalize="characters">
       <button type="button" class="btn btn-primer" id="btn-uid-manual">OK</button>
     </div>
+    <div class="dk-nfc"><button type="button" class="btn btn-ghost tombol-nfc hidden" id="btn-nfc-dk">📲 Pakai NFC HP</button></div>
     <div class="modal-aksi">
       <button type="button" class="btn btn-ghost hidden" id="btn-dk-lewati">Lewati</button>
       <button type="button" class="btn btn-ghost hidden" id="btn-dk-lepas">Lepas Kartu</button>
@@ -1618,12 +1621,16 @@ document.addEventListener('keydown', (e)=>{
 }, true);
 
 // NFC bawaan HP (Web NFC). Hanya muncul di browser yang mendukung (Chrome Android).
+function labelNfc(){
+  const teks = RFID.nfc ? '📲 NFC HP aktif (ketuk untuk matikan)' : '📲 Pakai NFC HP';
+  document.querySelectorAll('.tombol-nfc').forEach(b=>{ b.textContent = teks; });
+}
 async function toggleNfcHp(){
-  const tombol = el('btn-nfc-hp');
+  if (!('NDEFReader' in window)) { tampilkanToast('Browser ini tidak mendukung NFC HP. Gunakan Chrome di Android.'); return; }
   if (RFID.nfc) {
     try{ RFID.nfc.abort.abort(); }catch(e){}
     RFID.nfc = null;
-    tombol.textContent = '📲 Pakai NFC HP';
+    labelNfc();
     tampilkanToast('NFC HP dimatikan.');
     return;
   }
@@ -1634,13 +1641,14 @@ async function toggleNfcHp(){
     reader.onreading = (ev)=>{ if (ev.serialNumber) terimaUid(ev.serialNumber, 'nfc'); };
     reader.onreadingerror = ()=> tampilkanToast('Kartu terdeteksi tetapi tidak bisa dibaca lewat NFC HP. Coba reader USB.');
     RFID.nfc = { reader: reader, abort: abort };
-    tombol.textContent = '📲 NFC HP aktif (ketuk untuk matikan)';
+    labelNfc();
+    tampilkanToast('NFC HP aktif. Tempelkan kartu di bagian belakang HP.');
   } catch(err){
-    tampilkanToast('NFC tidak bisa diaktifkan: ' + (err && err.message ? err.message : err));
+    tampilkanToast('NFC tidak bisa diaktifkan: ' + (err && err.message ? err.message : err) + '. Pastikan NFC di pengaturan HP menyala.');
   }
 }
-if ('NDEFReader' in window) el('btn-nfc-hp').classList.remove('hidden');
-el('btn-nfc-hp').addEventListener('click', toggleNfcHp);
+if ('NDEFReader' in window) document.querySelectorAll('.tombol-nfc').forEach(b=>b.classList.remove('hidden'));
+document.querySelectorAll('.tombol-nfc').forEach(b=>b.addEventListener('click', toggleNfcHp));
 
 /* ----- Pendaftaran kartu ke siswa (satuan atau berantai) ----- */
 function mulaiPendaftaranKartu(antrian){
@@ -1650,6 +1658,8 @@ function mulaiPendaftaranKartu(antrian){
   if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   el('modal-daftar-kartu').classList.remove('hidden');
   tampilkanSiswaPendaftaran();
+  RFID.nfcDariPendaftaran = false;
+  if ('NDEFReader' in window && !RFID.nfc) { RFID.nfcDariPendaftaran = true; toggleNfcHp(); }
 }
 
 function tampilkanSiswaPendaftaran(){
@@ -1696,6 +1706,8 @@ function akhiriPendaftaranKartu(){
   const p = RFID.pairing;
   RFID.pairing = null;
   el('modal-daftar-kartu').classList.add('hidden');
+  if (RFID.nfcDariPendaftaran && RFID.nfc) { try{ RFID.nfc.abort.abort(); }catch(e){} RFID.nfc = null; labelNfc(); }
+  RFID.nfcDariPendaftaran = false;
   if (p && p.berhasil) tampilkanToast(p.berhasil + ' kartu berhasil didaftarkan.');
   muatSiswa();
 }
